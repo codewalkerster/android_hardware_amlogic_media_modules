@@ -1400,7 +1400,10 @@ struct tile_s {
 
 #define SEI_MASTER_DISPLAY_COLOR_MASK 0x00000001
 #define SEI_CONTENT_LIGHT_LEVEL_MASK  0x00000002
-#define SEI_HDR10PLUS_MASK			  0x00000004
+//*FIXME* This should be restored to the proper value once downstream HDR10+ handling code is properly working
+//since for now this causes HDR10+ files to be be output in SDR for both HDR10+ and HDR10 capable setups
+//#define SEI_HDR10PLUS_MASK			  0x00000004
+#define SEI_HDR10PLUS_MASK			  0x00000000
 
 #define VF_POOL_SIZE        32
 
