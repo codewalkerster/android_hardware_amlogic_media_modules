@@ -228,7 +228,7 @@ struct vdec_mpeg12_hw_s {
 	u32 disp_num;
 	struct timer_list check_timer;
 	u32 decode_timeout_count;
-	u32 start_process_time;
+	unsigned long int start_process_time;
 	u32 last_vld_level;
 	u32 eos;
 	struct pic_info_t pics[DECODE_BUFFER_NUM_MAX];
@@ -317,6 +317,7 @@ unsigned int mpeg12_debug_mask = 0xff;
 #define PRINT_FLAG_VDEC_STATUS        0x0800
 #define PRINT_FLAG_PARA_DATA          0x1000
 #define PRINT_FLAG_USERDATA_DETAIL    0x2000
+#define PRINT_FLAG_TIMEOUT_STATUS	  0x4000
 
 
 
@@ -1909,7 +1910,7 @@ static void vmpeg12_canvas_init(struct vdec_mpeg12_hw_s *hw)
 			hw->canvas_config[i][1].width = canvas_width;
 			hw->canvas_config[i][1].height = canvas_height / 2;
 			hw->canvas_config[i][1].block_mode = hw->canvas_mode;
-			hw->canvas_config[i][0].endian =
+			hw->canvas_config[i][1].endian =
 				(hw->canvas_mode == CANVAS_BLKMODE_LINEAR)?7:0;
 
 			canvas_config_config(canvas_u(canvas),
@@ -2073,9 +2074,9 @@ static void check_timer_func(unsigned long arg)
 		radr = 0;
 	}
 
-	if (debug_enable == 0 &&
+	if (((debug_enable & PRINT_FLAG_TIMEOUT_STATUS) == 0) &&
 		(vdec_frame_based(vdec) ||
-		(READ_VREG(VLD_MEM_VIFIFO_LEVEL) > 0x100)) &&
+		((u32)READ_VREG(VLD_MEM_VIFIFO_LEVEL) > 0x100)) &&
 		(timeout_val > 0) &&
 		(hw->start_process_time > 0) &&
 		((1000 * (jiffies - hw->start_process_time) / HZ)
@@ -2108,6 +2109,7 @@ static int vmpeg12_hw_ctx_restore(struct vdec_mpeg12_hw_s *hw)
 	if (!hw->init_flag)
 		vmpeg12_canvas_init(hw);
 	else {
+		WRITE_VREG(MREG_CO_MV_START, hw->buf_start);
 		for (i = 0; i < DECODE_BUFFER_NUM_MAX; i++) {
 			canvas_config_config(canvas_y(hw->canvas_spec[i]),
 				&hw->canvas_config[i][0]);
