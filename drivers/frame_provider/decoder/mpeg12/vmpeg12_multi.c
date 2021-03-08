@@ -1514,6 +1514,9 @@ static int prepare_display_buf(struct vdec_mpeg12_hw_s *hw,
 			nv_order = VIDTYPE_VIU_NV12;
 	}
 
+#ifdef NV21
+	type = nv_order;
+#endif
 	if (hw == NULL || pic == NULL)
 		return -1;
 
