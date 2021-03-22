@@ -2885,6 +2885,7 @@ int prepare_display_buf(struct vdec_s *vdec, struct FrameStore *frame)
 				vf->pts = 0;
 				vf->pts_us64 = 0;
 			}
+		}
 
 		if (i == 0) {
 			struct vdec_s *pvdec;
