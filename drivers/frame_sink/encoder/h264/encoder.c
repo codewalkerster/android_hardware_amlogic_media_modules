@@ -93,6 +93,7 @@ static u32 encode_print_level = LOG_DEBUG;
 static u32 no_timeout;
 static int nr_mode = -1;
 static u32 qp_table_debug;
+static u32 manual_ucode = 0xff;
 
 #ifdef H264_ENC_SVC
 static u32 svc_enable = 0; /* Enable sac feature or not */
@@ -413,7 +414,7 @@ static struct BuffInfo_s amvenc_buffspec[] = {
 };
 
 enum ucode_type_e {
-	UCODE_GXL,
+    UCODE_GXL = 0,
 	UCODE_TXL,
 	UCODE_G12A,
 	UCODE_MAX
@@ -447,6 +448,10 @@ static const char *select_ucode(u32 ucode_index)
 	default:
 		break;
 	}
+    if (manual_ucode!=0xff) {
+        pr_err("manual ucode: %d\n", manual_ucode);
+        return (const char *)ucode_name[(enum ucode_type_e) manual_ucode];
+    }
 	return (const char *)ucode_name[ucode];
 }
 
@@ -3261,12 +3266,20 @@ static long amvenc_avc_ioctl(struct file *file, u32 cmd, ulong arg)
 				wq->mem.bufspec.max_height, (void *)wq);
 			return -1;
 		}
-		pr_err("hwenc: AMVENC_AVC_IOC_CONFIG_INIT: w:%d, h:%d\n", wq->pic.encoder_width, wq->pic.encoder_height);
+
 		wq->pic.encoder_width = addr_info[2];
 		wq->pic.encoder_height = addr_info[3];
-
 		wq->pic.color_space = addr_info[4];
-		pr_err("hwenc: AMVENC_AVC_IOC_CONFIG_INIT, wq->pic.color_space=%#x\n", wq->pic.color_space);
+		wq->pic.profile = addr_info[5];
+
+		pr_err("hwenc: AMVENC_AVC_IOC_CONFIG_INIT: w:%d, h:%d, colorspace:%#x, profile:%u\n",
+                wq->pic.encoder_width, wq->pic.encoder_height, wq->pic.color_space, wq->pic.profile);
+
+		if (wq->pic.profile == 66)
+			manual_ucode = 1;
+		else if (wq->pic.profile == 77)
+			manual_ucode = 2;
+
 		if (wq->pic.encoder_width *
 			wq->pic.encoder_height >= 1280 * 720)
 			clock_level = 6;
@@ -4560,6 +4573,9 @@ MODULE_PARM_DESC(nr_mode, "\n nr_mode option\n");
 
 module_param(qp_table_debug, uint, 0664);
 MODULE_PARM_DESC(qp_table_debug, "\n print qp table\n");
+
+module_param(manual_ucode, uint, 0664);
+MODULE_PARM_DESC(manual_ucode, "\n manual_ucode\n");
 
 #ifdef H264_ENC_SVC
 module_param(svc_enable, uint, 0664);
