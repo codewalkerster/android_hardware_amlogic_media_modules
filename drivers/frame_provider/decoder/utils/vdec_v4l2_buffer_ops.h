@@ -8,23 +8,15 @@ int vdec_v4l_get_buffer(
 	struct aml_vcodec_ctx *ctx,
 	struct vdec_v4l2_buffer **out);
 
-int vdec_v4l_get_pic_info(
+int vdec_v4l_set_pic_infos(
 	struct aml_vcodec_ctx *ctx,
-	struct vdec_pic_info *pic);
-
-int vdec_v4l_set_ps_infos(
-	struct aml_vcodec_ctx *ctx,
-	struct aml_vdec_ps_infos *ps);
-
-int vdec_v4l_set_hdr_infos(
-	struct aml_vcodec_ctx *ctx,
-	struct aml_vdec_hdr_infos *hdr);
+	struct aml_vdec_pic_infos *info);
 
 int vdec_v4l_write_frame_sync(
 	struct aml_vcodec_ctx *ctx);
 
-int vdec_v4l_post_evet(
-	struct aml_vcodec_ctx *ctx,
-	u32 event);
+int vdec_v4l_binding_fd_and_vf(
+	ulong v4l_handle,
+	void *vf);
 
 #endif

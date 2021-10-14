@@ -190,6 +190,7 @@ unsigned int DECODE_BUFFER_END = 0x05000000;
 static unsigned int dynamic_buf_num_margin = 8;
 
 #define DECODE_BUFFER_NUM_MAX    16
+#define DISPLAY_BUFFER_NUM         4
 #define MAX_BMMU_BUFFER_NUM	(DECODE_BUFFER_NUM_MAX + dynamic_buf_num_margin)
 #define TOTAL_BMMU_BUFF_NUM     (MAX_BMMU_BUFFER_NUM * 2 + 3)
 #define VF_BUFFER_IDX(n) (2  + n)
@@ -232,6 +233,7 @@ static struct buffer_spec_s buffer_spec1[MAX_BMMU_BUFFER_NUM];
 */
 static struct buffer_spec_s *buffer_spec0;
 static struct buffer_spec_s *buffer_spec1;
+
 static void *mm_blk_handle;
 
 /*
@@ -748,7 +750,7 @@ static void do_alloc_work(struct work_struct *work)
 					mb_width, mb_height);
 
 		total_dec_frame_buffering[0] =
-			max_dec_frame_buffering[0] + dynamic_buf_num_margin;
+			max_dec_frame_buffering[0] +  dynamic_buf_num_margin;
 
 		mb_width = (mb_width + 3) & 0xfffffffc;
 		mb_height = (mb_height + 3) & 0xfffffffc;
@@ -1376,7 +1378,6 @@ static int vh264mvc_local_init(void)
 	max_dec_frame_buffering[1] = -1;
 	fill_ptr = get_ptr = put_ptr = putting_ptr = 0;
 	dirty_frame_num = 0;
-
 	for (i = 0; i < DECODE_BUFFER_NUM_MAX; i++) {
 		view0_vfbuf_use[i] = 0;
 		view1_vfbuf_use[i] = 0;
@@ -1420,6 +1421,7 @@ static s32 vh264mvc_init(void)
 {
 	int ret = -1;
 	char *buf = vmalloc(0x1000 * 16);
+
 	if (buf == NULL)
 		return -ENOMEM;
 

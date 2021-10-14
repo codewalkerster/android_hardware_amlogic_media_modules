@@ -18,7 +18,6 @@
 #ifndef AML_VP9_PARSER_H
 #define AML_VP9_PARSER_H
 
-#include "../aml_vcodec_drv.h"
 #include "../utils/pixfmt.h"
 #include "../utils/get_bits.h"
 

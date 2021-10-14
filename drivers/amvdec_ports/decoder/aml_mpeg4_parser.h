@@ -1,7 +1,6 @@
 #ifndef AVCODEC_MPEG4VIDEO_H
 #define AVCODEC_MPEG4VIDEO_H
 
-#include "../aml_vcodec_drv.h"
 #include "../utils/pixfmt.h"
 #include "../utils/common.h"
 

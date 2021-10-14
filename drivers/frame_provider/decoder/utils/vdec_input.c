@@ -221,6 +221,7 @@ static void vframe_block_add_chunk(struct vframe_block_list_s *block,
 	block->input->sequence++;
 }
 
+
 static void vframe_block_free_block(struct vframe_block_list_s *block)
 {
 	if (block->addr) {
@@ -518,16 +519,16 @@ int vdec_input_set_buffer(struct vdec_input_s *input, u32 start, u32 size)
 		input->swap_page_phys = codec_mm_alloc_for_dma("SWAP",
 			1, 0, CODEC_MM_FLAGS_TVP);
 	else {
-		input->swap_page = alloc_page(GFP_KERNEL);
-		if (input->swap_page) {
-			input->swap_page_phys =
-				page_to_phys(input->swap_page);
-		}
+		input->swap_page = dma_alloc_coherent(v4l_get_dev_from_codec_mm(),
+				PAGE_SIZE,
+				&input->swap_page_phys, GFP_KERNEL);
+
+		if (input->swap_page == NULL)
+			return -ENOMEM;
 	}
 
 	if (input->swap_page_phys == 0)
 		return -ENOMEM;
-
 	return 0;
 }
 EXPORT_SYMBOL(vdec_input_set_buffer);
@@ -970,16 +971,6 @@ int vdec_input_add_frame(struct vdec_input_s *input, const char *buf,
 	return ret;
 }
 EXPORT_SYMBOL(vdec_input_add_frame);
-
-int vdec_input_add_frame_with_dma(struct vdec_input_s *input, ulong addr,
-			size_t count, u32 handle)
-{
-	struct vdec_s *vdec = input->vdec;
-
-	return vdec_secure(vdec) ?
-		vdec_input_add_chunk(input, (char *)addr, count, handle) : -1;
-}
-EXPORT_SYMBOL(vdec_input_add_frame_with_dma);
 
 struct vframe_chunk_s *vdec_input_next_chunk(struct vdec_input_s *input)
 {
