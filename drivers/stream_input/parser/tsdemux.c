@@ -606,24 +606,20 @@ s32 tsdemux_init(u32 vid, u32 aid, u32 sid, u32 pcrid, bool is_hevc,
 			(7 << ES_SUB_WR_ENDIAN_BIT) | ES_SUB_MAN_RD_PTR);
 
 	/* #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8 */
-	if (vid != 0xffff) {
-		if (has_hevc_vdec())
-			r = pts_start((is_hevc) ? PTS_TYPE_HEVC : PTS_TYPE_VIDEO);
-		else
-			/* #endif */
-			r = pts_start(PTS_TYPE_VIDEO);
-		if ((r < 0) && (r != -EBUSY)) {
-			pr_info("Video pts start failed.(%d)\n", r);
-			goto err1;
-		}
+	if (has_hevc_vdec())
+		r = pts_start((is_hevc) ? PTS_TYPE_HEVC : PTS_TYPE_VIDEO);
+	else
+		/* #endif */
+		r = pts_start(PTS_TYPE_VIDEO);
+
+	if (r < 0) {
+		pr_info("Video pts start failed.(%d)\n", r);
+		goto err1;
 	}
-	
-	if (aid != 0xffff) {
-		r = pts_start(PTS_TYPE_AUDIO);
-		if ((r < 0) && (r != -EBUSY)) {
-			pr_info("Audio pts start failed.(%d)\n", r);
-			goto err2;
-		}
+	r = pts_start(PTS_TYPE_AUDIO);
+	if (r < 0) {
+		pr_info("Audio pts start failed.(%d)\n", r);
+		goto err2;
 	}
 	/*TODO irq */
 
@@ -763,17 +759,7 @@ static int limited_delay_check(struct file *file,
 		struct stream_buf_s *abuf,
 		const char __user *buf, size_t count)
 {
-	struct port_priv_s *priv = (struct port_priv_s *)file->private_data;
-	struct stream_port_s *port = priv->port;
 	int write_size;
-
-	if (!((port->flag & PORT_FLAG_VID) &&
-		(port->flag & PORT_FLAG_AID))) {
-		struct stream_buf_s *buf =
-			(port->flag & PORT_FLAG_VID) ? vbuf : abuf;
-
-		return min_t(int, count, stbuf_space(buf));
-	}
 
 	if (vbuf->max_buffer_delay_ms > 0 && abuf->max_buffer_delay_ms > 0 &&
 		stbuf_level(vbuf) > 1024 && stbuf_level(abuf) > 256) {
@@ -816,6 +802,7 @@ ssize_t drm_tswrite(struct file *file,
 {
 	s32 r;
 	u32 realcount = count;
+	u32 re_count = count;
 	u32 havewritebytes = 0;
 
 	struct drm_info tmpmm;
@@ -874,14 +861,12 @@ ssize_t drm_tswrite(struct file *file,
 					r = stbuf_wait_space(vbuf, wait_size);
 
 					if (r < 0) {
-						if (r != -EAGAIN)
-							pr_info
-							("write no space--- ");
-						if (r != -EAGAIN)
-							pr_info
-							("no space,%d--%d,r-%d\n",
-							stbuf_space(vbuf),
-							stbuf_space(abuf), r);
+						pr_info
+						("write no space--- ");
+						pr_info
+						("no space,%d--%d,r-%d\n",
+						 stbuf_space(vbuf),
+						 stbuf_space(abuf), r);
 						return r;
 					}
 				}
@@ -903,30 +888,13 @@ ssize_t drm_tswrite(struct file *file,
 			}
 		}
 
-		if ((port->flag & PORT_FLAG_VID) &&
-			(port->flag & PORT_FLAG_AID)) {
-			write_size = min(stbuf_space(vbuf), stbuf_space(abuf));
-			write_size = min(count, write_size);
-		} else {
-			struct stream_buf_s *buf =
-				(port->flag & PORT_FLAG_VID) ? vbuf : abuf;
-		
-			write_size = min_t(int, count, stbuf_space(buf));
-		}
+		write_size = min(stbuf_space(vbuf), stbuf_space(abuf));
+		write_size = min(count, write_size);
 		/* pr_info("write_size = %d,count = %d,\n",*/
 		   /*write_size, count); */
-		if (write_size > 0) {
-			r = _tsdemux_write((const char __user *)realbuf + havewritebytes,
-				write_size, isphybuf);
-			if (r < 0) {
-				if (r != -EAGAIN)
-					pr_info
-					("vspace %d--aspace %d,r-%d\n",
-					stbuf_space(vbuf),
-					stbuf_space(abuf), r);
-				return r;
-			}
-		}
+		if (write_size > 0)
+			r = _tsdemux_write((const char __user *)realbuf,
+					 write_size, isphybuf);
 		else
 			return -EAGAIN;
 
@@ -937,12 +905,11 @@ ssize_t drm_tswrite(struct file *file,
 		if (havewritebytes == realcount)
 			break;	/* write ok; */
 		else if (havewritebytes > realcount)
-			pr_info(" error ! write too much havewritebytes = %u, r = %u\n",
-			(u32)havewritebytes,(u32)realcount);
+			pr_info(" error ! write too much\n");
 
 		count -= r;
 	}
-	return havewritebytes;
+	return re_count;
 }
 
 ssize_t tsdemux_write(struct file *file,

@@ -46,6 +46,7 @@
 #include "../utils/decoder_bmmu_box.h"
 #include <linux/amlogic/media/codec_mm/codec_mm.h>
 #include <linux/amlogic/media/codec_mm/configs.h>
+#include "../utils/config_parser.h"
 #include "../utils/firmware.h"
 #include "../utils/vdec_v4l2_buffer_ops.h"
 #include "../utils/config_parser.h"
@@ -106,19 +107,18 @@
 #define CTX_CO_MV_OFFSET        (CTX_QUANT_MATRIX_OFFSET + 1*1024)
 #define CTX_DECBUF_OFFSET       (CTX_CO_MV_OFFSET + 0x11000)
 
-#define MAX_BMMU_BUFFER_NUM (DECODE_BUFFER_NUM_MAX + 1)
 #define DEFAULT_MEM_SIZE	(32*SZ_1M)
 static u32 buf_size = 32 * 1024 * 1024;
 static int pre_decode_buf_level = 0x800;
 static int start_decode_buf_level = 0x4000;
 static u32 dec_control;
-static u32 error_frame_skip_level = 1;
+static u32 error_frame_skip_level = 2;
 static u32 udebug_flag;
 static unsigned int radr;
 static unsigned int rval;
 
 static u32 without_display_mode;
-static u32 dynamic_buf_num_margin;
+static u32 dynamic_buf_num_margin = 2;
 
 #define VMPEG12_DEV_NUM        9
 static unsigned int max_decode_instance_num = VMPEG12_DEV_NUM;
@@ -143,7 +143,7 @@ static unsigned int decode_timeout_val = 200;
 #define AGAIN_HAS_THRESHOLD
 
 #ifdef AGAIN_HAS_THRESHOLD
-static u32 again_threshold;
+u32 again_threshold;
 #endif
 
 /*
@@ -155,18 +155,6 @@ enum {
 	FRAME_REPEAT_BOT,
 	FRAME_REPEAT_NONE
 };
-
-/*Send by AV_SCRATCH_9*/
-#define MPEG12_PIC_DONE     1
-#define MPEG12_DATA_EMPTY   2
-#define MPEG12_SEQ_END      3
-#define MPEG12_DATA_REQUEST 4
-
-/*Send by AV_SCRATCH_G*/
-#define MPEG12_V4L2_INFO_NOTIFY 1
-/*Send by AV_SCRATCH_J*/
-#define MPEG12_USERDATA_DONE 0x8000
-
 #define DEC_RESULT_NONE     0
 #define DEC_RESULT_DONE     1
 #define DEC_RESULT_AGAIN    2
@@ -179,6 +167,12 @@ enum {
 #define DEC_DECODE_TIMEOUT         0x21
 #define DECODE_ID(hw) (hw_to_vdec(hw)->id)
 #define DECODE_STOP_POS         AV_SCRATCH_K
+
+static struct vframe_s *vmpeg_vf_peek(void *);
+static struct vframe_s *vmpeg_vf_get(void *);
+static void vmpeg_vf_put(struct vframe_s *, void *);
+static int vmpeg_vf_states(struct vframe_states *states, void *);
+static int vmpeg_event_cb(int type, void *data, void *private_data);
 
 struct mmpeg2_userdata_record_t {
 	struct userdata_meta_info_t meta_info;
@@ -210,6 +204,8 @@ struct pic_info_t {
 	u64 pts64;
 	bool pts_valid;
 	ulong v4l_ref_buf_addr;
+	u32 hw_decode_time;
+	u32 frame_size; // For frame base mode
 };
 
 struct vdec_mpeg12_hw_s {
@@ -249,6 +245,7 @@ struct vdec_mpeg12_hw_s {
 	unsigned long int start_process_time;
 	u32 last_vld_level;
 	u32 eos;
+
 	struct pic_info_t pics[DECODE_BUFFER_NUM_MAX];
 	u32 canvas_spec[DECODE_BUFFER_NUM_MAX];
 	u64 lastpts64;
@@ -257,7 +254,6 @@ struct vdec_mpeg12_hw_s {
 	struct dec_sysinfo vmpeg12_amstream_dec_info;
 
 	s32 refs[2];
-	u32 timeout_processing;
 	int dec_result;
 	struct work_struct work;
 	struct work_struct timeout_work;
@@ -315,21 +311,13 @@ struct vdec_mpeg12_hw_s {
 	bool v4l_params_parsed;
 	u32 buf_num;
 	u32 dynamic_buf_num_margin;
+	struct vdec_info gvs;
+	struct vframe_qos_s vframe_qos;
 	u32 i_only;
-	int vdec_pg_enable_flag;
 };
 static void vmpeg12_local_init(struct vdec_mpeg12_hw_s *hw);
 static int vmpeg12_hw_ctx_restore(struct vdec_mpeg12_hw_s *hw);
 static void reset_process_time(struct vdec_mpeg12_hw_s *hw);
-
-static struct vframe_s *vmpeg_vf_peek(void *);
-static struct vframe_s *vmpeg_vf_get(void *);
-static void vmpeg_vf_put(struct vframe_s *, void *);
-static int vmpeg_vf_states(struct vframe_states *states, void *);
-static int vmpeg_event_cb(int type, void *data, void *private_data);
-static void start_process_time_set(struct vdec_mpeg12_hw_s *hw);
-
-static struct vdec_info gvs;
 static int debug_enable;
 /*static struct work_struct userdata_push_work;*/
 #undef pr_info
@@ -400,55 +388,70 @@ static int vmpeg12_v4l_alloc_buff_config_canvas(struct vdec_mpeg12_hw_s *hw, int
 {
 	int ret;
 	u32 canvas;
-	ulong decbuf_start = 0;
-	int decbuf_y_size = 0;
+	ulong decbuf_start = 0, decbuf_uv_start = 0;
+	int decbuf_y_size = 0, decbuf_uv_size = 0;
 	u32 canvas_width = 0, canvas_height = 0;
 	struct vdec_s *vdec = hw_to_vdec(hw);
 	struct vdec_v4l2_buffer *fb = NULL;
+	struct aml_vcodec_ctx *ctx =
+		(struct aml_vcodec_ctx *)(hw->v4l2_ctx);
 
 	if (hw->pics[i].v4l_ref_buf_addr)
 		return 0;
 
 	ret = vdec_v4l_get_buffer(hw->v4l2_ctx, &fb);
-	if (ret) {
+	if (ret < 0) {
 		debug_print(DECODE_ID(hw), 0,
-			"[%d] get fb fail.\n",
-			((struct aml_vcodec_ctx *)
-			(hw->v4l2_ctx))->id);
+			"[%d] get fb fail %d/%d.\n",
+			ctx->id, i, hw->buf_num);
 		return ret;
+	}
+
+	if (!hw->frame_width || !hw->frame_height) {
+		struct vdec_pic_info pic;
+		vdec_v4l_get_pic_info(ctx, &pic);
+		hw->frame_width = pic.coded_width;
+		hw->frame_height = pic.coded_height;
+		debug_print(DECODE_ID(hw), 0,
+			"[%d] set %d x %d from IF layer\n", ctx->id,
+			hw->frame_width, hw->frame_height);
 	}
 
 	hw->pics[i].v4l_ref_buf_addr = (ulong)fb;
 	if (fb->num_planes == 1) {
 		decbuf_start	= fb->m.mem[0].addr;
 		decbuf_y_size	= fb->m.mem[0].offset;
+		decbuf_uv_start	= decbuf_start + decbuf_y_size;
+		decbuf_uv_size	= decbuf_y_size / 2;
 		canvas_width	= ALIGN(hw->frame_width, 64);
 		canvas_height	= ALIGN(hw->frame_height, 32);
 		fb->m.mem[0].bytes_used = fb->m.mem[0].size;
 	} else if (fb->num_planes == 2) {
 		decbuf_start	= fb->m.mem[0].addr;
 		decbuf_y_size	= fb->m.mem[0].size;
+		decbuf_uv_start	= fb->m.mem[1].addr;
+		decbuf_uv_size	= fb->m.mem[1].size;
 		canvas_width	= ALIGN(hw->frame_width, 64);
 		canvas_height	= ALIGN(hw->frame_height, 32);
 		fb->m.mem[0].bytes_used = decbuf_y_size;
-		fb->m.mem[1].bytes_used = decbuf_y_size << 1;
+		fb->m.mem[1].bytes_used = decbuf_uv_size;
 	}
 
 	debug_print(DECODE_ID(hw), 0, "[%d] %s(), v4l ref buf addr: 0x%x\n",
-		((struct aml_vcodec_ctx *)(hw->v4l2_ctx))->id, __func__, fb);
+		ctx->id, __func__, fb);
 
 	if (vdec->parallel_dec == 1) {
 		u32 tmp;
-		if (canvas_y(hw->canvas_spec[i]) == 0xff) {
-			tmp = vdec->get_canvas_ex(CORE_MASK_VDEC_1, vdec->id);
-			hw->canvas_spec[i] &= ~0xff;
-			hw->canvas_spec[i] |= tmp;
-		}
 		if (canvas_u(hw->canvas_spec[i]) == 0xff) {
 			tmp = vdec->get_canvas_ex(CORE_MASK_VDEC_1, vdec->id);
 			hw->canvas_spec[i] &= ~(0xffff << 8);
 			hw->canvas_spec[i] |= tmp << 8;
 			hw->canvas_spec[i] |= tmp << 16;
+		}
+		if (canvas_y(hw->canvas_spec[i]) == 0xff) {
+			tmp = vdec->get_canvas_ex(CORE_MASK_VDEC_1, vdec->id);
+			hw->canvas_spec[i] &= ~0xff;
+			hw->canvas_spec[i] |= tmp;
 		}
 		canvas = hw->canvas_spec[i];
 	} else {
@@ -464,13 +467,19 @@ static int vmpeg12_v4l_alloc_buff_config_canvas(struct vdec_mpeg12_hw_s *hw, int
 		(hw->canvas_mode == CANVAS_BLKMODE_LINEAR) ? 7 : 0;
 	canvas_config_config(canvas_y(canvas), &hw->canvas_config[i][0]);
 
-	hw->canvas_config[i][1].phy_addr	= decbuf_start + decbuf_y_size;
+	hw->canvas_config[i][1].phy_addr	= decbuf_uv_start;
 	hw->canvas_config[i][1].width		= canvas_width;
 	hw->canvas_config[i][1].height		= canvas_height / 2;
 	hw->canvas_config[i][1].block_mode	= hw->canvas_mode;
 	hw->canvas_config[i][1].endian		=
 		(hw->canvas_mode == CANVAS_BLKMODE_LINEAR) ? 7 : 0;
 	canvas_config_config(canvas_u(canvas), &hw->canvas_config[i][1]);
+
+	debug_print(DECODE_ID(hw), PRINT_FLAG_BUFFER_DETAIL,
+		"[%d] %s(), canvas: 0x%x mode: %d y: %x uv: %x w: %d h: %d\n",
+		ctx->id, __func__, canvas, hw->canvas_mode,
+		decbuf_start, decbuf_uv_start,
+		canvas_width, canvas_height);
 
 	return 0;
 }
@@ -529,6 +538,99 @@ static u32 spec_to_index(struct vdec_mpeg12_hw_s *hw, u32 spec)
 	}
 
 	return hw->buf_num;
+}
+
+/* +[SE][BUG-145343][huanghang] fixed:mpeg2 frame qos info notify */
+static void fill_frame_info(struct vdec_mpeg12_hw_s *hw, u32 slice_type,
+							int frame_size, u32 pts)
+{
+	unsigned char a[3];
+	unsigned char i, j, t;
+	unsigned long  data;
+	struct vframe_qos_s *vframe_qos = &hw->vframe_qos;
+
+	vframe_qos->type = ((slice_type & PICINFO_TYPE_MASK) ==
+						PICINFO_TYPE_I) ? 1 :
+						((slice_type &
+						PICINFO_TYPE_MASK) ==
+						PICINFO_TYPE_P) ? 2 : 3;
+	vframe_qos->size = frame_size;
+	vframe_qos->pts = pts;
+
+	get_random_bytes(&data, sizeof(unsigned long));
+	if (vframe_qos->type == 1)
+		data = 0;
+	a[0] = data & 0xff;
+	a[1] = (data >> 8) & 0xff;
+	a[2] = (data >> 16) & 0xff;
+
+	for (i = 0; i < 3; i++) {
+		for (j = i+1; j < 3; j++) {
+			if (a[j] < a[i]) {
+				t = a[j];
+				a[j] = a[i];
+				a[i] = t;
+			} else if (a[j] == a[i]) {
+				a[i]++;
+				t = a[j];
+				a[j] = a[i];
+				a[i] = t;
+			}
+		}
+	}
+	vframe_qos->max_mv = a[2];
+	vframe_qos->avg_mv = a[1];
+	vframe_qos->min_mv = a[0];
+
+	get_random_bytes(&data, sizeof(unsigned long));
+	a[0] = data & 0x1f;
+	a[1] = (data >> 8) & 0x3f;
+	a[2] = (data >> 16) & 0x7f;
+
+	for (i = 0; i < 3; i++) {
+		for (j = i+1; j < 3; j++) {
+			if (a[j] < a[i]) {
+				t = a[j];
+				a[j] = a[i];
+				a[i] = t;
+			} else if (a[j] == a[i]) {
+				a[i]++;
+				t = a[j];
+				a[j] = a[i];
+				a[i] = t;
+			}
+		}
+	}
+	vframe_qos->max_qp = a[2];
+	vframe_qos->avg_qp = a[1];
+	vframe_qos->min_qp = a[0];
+
+	get_random_bytes(&data, sizeof(unsigned long));
+	a[0] = data & 0x1f;
+	a[1] = (data >> 8) & 0x3f;
+	a[2] = (data >> 16) & 0x7f;
+
+	for (i = 0; i < 3; i++) {
+		for (j = i + 1; j < 3; j++) {
+			if (a[j] < a[i]) {
+				t = a[j];
+				a[j] = a[i];
+				a[i] = t;
+			} else if (a[j] == a[i]) {
+				a[i]++;
+				t = a[j];
+				a[j] = a[i];
+				a[i] = t;
+			}
+		}
+	}
+	vframe_qos->max_skip = a[2];
+	vframe_qos->avg_skip = a[1];
+	vframe_qos->min_skip = a[0];
+
+	vframe_qos->num++;
+
+	return;
 }
 
 static void set_frame_info(struct vdec_mpeg12_hw_s *hw, struct vframe_s *vf)
@@ -1370,6 +1472,28 @@ void userdata_pushed_drop(struct vdec_mpeg12_hw_s *hw)
 }
 
 
+static inline void hw_update_gvs(struct vdec_mpeg12_hw_s *hw)
+{
+	if (hw->gvs.frame_height != hw->frame_height) {
+		hw->gvs.frame_width = hw->frame_width;
+		hw->gvs.frame_height = hw->frame_height;
+	}
+	if (hw->gvs.frame_dur != hw->frame_dur) {
+		hw->gvs.frame_dur = hw->frame_dur;
+		if (hw->frame_dur != 0)
+			hw->gvs.frame_rate = 96000 / hw->frame_dur;
+		else
+			hw->gvs.frame_rate = -1;
+	}
+	if (hw->gvs.ratio_control != hw->ratio_control)
+		hw->gvs.ratio_control = hw->ratio_control;
+
+	hw->gvs.status = hw->stat;
+	hw->gvs.error_count = READ_VREG(AV_SCRATCH_C);
+	hw->gvs.drop_frame_count = hw->drop_frame_count;
+
+}
+
 static int prepare_display_buf(struct vdec_mpeg12_hw_s *hw,
 	struct pic_info_t *pic)
 {
@@ -1379,23 +1503,34 @@ static int prepare_display_buf(struct vdec_mpeg12_hw_s *hw,
 	u32 index = pic->index;
 	u32 info = pic->buffer_info;
 	struct vdec_s *vdec = hw_to_vdec(hw);
+	struct aml_vcodec_ctx * v4l2_ctx = hw->v4l2_ctx;
+	ulong nv_order = VIDTYPE_VIU_NV21;
 	bool pb_skip = false;
 
+	/* swap uv */
+	if (hw->is_used_v4l) {
+		if ((v4l2_ctx->cap_pix_fmt == V4L2_PIX_FMT_NV12) ||
+			(v4l2_ctx->cap_pix_fmt == V4L2_PIX_FMT_NV12M))
+			nv_order = VIDTYPE_VIU_NV12;
+	}
+
+#ifdef NV21
+	type = nv_order;
+#endif
 	if (hw == NULL || pic == NULL)
 		return -1;
 
+	pb_skip = (hw->pics[hw->refs[0]].offset ==
+		hw->pics[hw->refs[1]].offset);
 	if (hw->i_only) {
 		pb_skip = 1;
 	}
 
 	user_data_ready_notify(hw, pic->pts, pic->pts_valid);
-#ifdef NV21
-	type = VIDTYPE_VIU_NV21;
-#endif
 
 	if (hw->frame_prog & PICINFO_PROG) {
 		field_num = 1;
-		type |= VIDTYPE_PROGRESSIVE | VIDTYPE_VIU_FIELD;
+		type |= VIDTYPE_PROGRESSIVE | VIDTYPE_VIU_FIELD | nv_order;
 	} else {
 #ifdef INTERLACE_SEQ_ALWAYS
 		/* once an interlace seq, force interlace, to make di easy. */
@@ -1420,11 +1555,6 @@ static int prepare_display_buf(struct vdec_mpeg12_hw_s *hw,
 		if (hw->is_used_v4l) {
 			vf->v4l_mem_handle
 				= hw->pics[index].v4l_ref_buf_addr;
-			if (vdec_v4l_binding_fd_and_vf(vf->v4l_mem_handle, vf) < 0) {
-				debug_print(DECODE_ID(hw), PRINT_FLAG_V4L_DETAIL,
-					"v4l: binding vf fail.\n");
-				return -1;
-			}
 			debug_print(DECODE_ID(hw), PRINT_FLAG_V4L_DETAIL,
 				"[%d] %s(), v4l mem handle: 0x%lx\n",
 				((struct aml_vcodec_ctx *)(hw->v4l2_ctx))->id,
@@ -1439,7 +1569,7 @@ static int prepare_display_buf(struct vdec_mpeg12_hw_s *hw,
 			vf->duration_pulldown = (field_num == 3) ?
 				(vf->duration >> 1):0;
 			if (i > 0)
-				type = VIDTYPE_VIU_NV21;
+				type = nv_order;
 			if (i == 1) /* second field*/
 				type |= (first_field_type == VIDTYPE_INTERLACE_TOP) ?
 					VIDTYPE_INTERLACE_BOTTOM : VIDTYPE_INTERLACE_TOP;
@@ -1484,13 +1614,19 @@ static int prepare_display_buf(struct vdec_mpeg12_hw_s *hw,
 			kfifo_put(&hw->newframe_q,
 				(const struct vframe_s *)vf);
 		} else {
-			debug_print(DECODE_ID(hw), 0,
+			debug_print(DECODE_ID(hw), PRINT_FLAG_TIMEINFO,
 				"%s, vf: %lx, num[%d]: %d(%c), dur: %d, type: %x, pts: %d(%lld)\n",
 				__func__, (ulong)vf, i, hw->disp_num, GET_SLICE_TYPE(info),
 				vf->duration, vf->type, vf->pts, vf->pts_us64);
 			hw->disp_num++;
-			if (i == 0)
-				decoder_do_frame_check(hw_to_vdec(hw), vf);
+			if (i == 0) {
+				struct vdec_s *vdec = hw_to_vdec(hw);
+
+				decoder_do_frame_check(vdec, vf);
+				hw_update_gvs(hw);
+				vdec_fill_vdec_frame(vdec, &hw->vframe_qos,
+					&hw->gvs, vf, pic->hw_decode_time);
+			}
 			vdec->vdec_fps_detec(vdec->id);
 			vf->mem_handle =
 				decoder_bmmu_box_get_mem_handle(
@@ -1563,7 +1699,7 @@ static int update_reference(struct vdec_mpeg12_hw_s *hw,
 		hw->refs[0] = hw->refs[1];
 		hw->refs[1] = index;
 		/* second pic do not output */
-		index =  hw->buf_num;
+		index = hw->buf_num;
 	} else {
 		hw->ref_use[hw->refs[0]]--;		//old ref0 ununsed
 		hw->refs[0] = hw->refs[1];
@@ -1584,7 +1720,7 @@ static bool is_ref_error(struct vdec_mpeg12_hw_s *hw)
 
 static irqreturn_t vmpeg12_isr_thread_fn(struct vdec_s *vdec, int irq)
 {
-	u32 reg, index, info, seqinfo, offset, pts, frame_size, tmp;
+	u32 reg, index, info, seqinfo, offset, pts, frame_size=0, tmp;
 	u64 pts_us64 = 0;
 	struct pic_info_t *new_pic, *disp_pic;
 	struct vdec_mpeg12_hw_s *hw =
@@ -1611,25 +1747,17 @@ static irqreturn_t vmpeg12_isr_thread_fn(struct vdec_s *vdec, int irq)
 	}
 
 	reg = READ_VREG(MREG_BUFFEROUT);
-	if (reg == MPEG12_DATA_REQUEST) {
-		debug_print(DECODE_ID(hw), PRINT_FLAG_RUN_FLOW,
-			"%s: data request, bcnt=%x\n",
-			__func__, READ_VREG(VIFF_BIT_CNT));
-		if (vdec_frame_based(vdec)) {
-			reset_process_time(hw);
-			hw->dec_result = DEC_RESULT_GET_DATA;
-			vdec_schedule_work(&hw->work);
-		}
-	} else if (reg == MPEG12_DATA_EMPTY) {
+	if (reg == 2) {
 		/*timeout when decoding next frame*/
 		debug_print(DECODE_ID(hw), PRINT_FLAG_VLD_DETAIL,
-			"%s: Insufficient data, lvl=%x ctrl=%x bcnt=%x\n",
-			__func__,
+			"mmpeg12: lack data, lvl=%x ctrl=%x bcnt=%x\n",
 			READ_VREG(VLD_MEM_VIFIFO_LEVEL),
 			READ_VREG(VLD_MEM_VIFIFO_CONTROL),
 			READ_VREG(VIFF_BIT_CNT));
+
 		if (vdec_frame_based(vdec)) {
-			userdata_pushed_drop(hw);
+			/* vmpeg12_save_hw_context(hw); */
+			reset_process_time(hw);
 			hw->dec_result = DEC_RESULT_DONE;
 			vdec_schedule_work(&hw->work);
 		} else {
@@ -1639,7 +1767,7 @@ static irqreturn_t vmpeg12_isr_thread_fn(struct vdec_s *vdec, int irq)
 			reset_process_time(hw);
 		}
 		return IRQ_HANDLED;
-	} else {  /* MPEG12_PIC_DONE, MPEG12_SEQ_END */
+	} else {
 		reset_process_time(hw);
 
 		info = READ_VREG(MREG_PIC_INFO);
@@ -1661,6 +1789,11 @@ static irqreturn_t vmpeg12_isr_thread_fn(struct vdec_s *vdec, int irq)
 		hw->dec_num++;
 		hw->dec_result = DEC_RESULT_DONE;
 		new_pic = &hw->pics[index];
+		if (vdec->mvfrm) {
+			new_pic->frame_size = vdec->mvfrm->frame_size;
+			new_pic->hw_decode_time =
+			local_clock() - vdec->mvfrm->hw_decode_start;
+		}
 		tmp = READ_VREG(MREG_PIC_WIDTH);
 		if ((tmp > 1920) || (tmp == 0)) {
 			new_pic->width = 1920;
@@ -1684,15 +1817,15 @@ static irqreturn_t vmpeg12_isr_thread_fn(struct vdec_s *vdec, int irq)
 				(struct aml_vcodec_ctx *)(hw->v4l2_ctx);
 
 			if (ctx->param_sets_from_ucode && !hw->v4l_params_parsed) {
-				struct aml_vdec_pic_infos info;
+				struct aml_vdec_ps_infos ps;
 
-				info.visible_width	= hw->frame_width;
-				info.visible_height	= hw->frame_height;
-				info.coded_width	= ALIGN(hw->frame_width, 64);
-				info.coded_height	= ALIGN(hw->frame_height, 64);
-				info.dpb_size		= hw->buf_num;
+				ps.visible_width	= hw->frame_width;
+				ps.visible_height	= hw->frame_height;
+				ps.coded_width		= ALIGN(hw->frame_width, 64);
+				ps.coded_height		= ALIGN(hw->frame_height, 32);
+				ps.dpb_size		= hw->buf_num;
 				hw->v4l_params_parsed	= true;
-				vdec_v4l_set_pic_infos(ctx, &info);
+				vdec_v4l_set_ps_infos(ctx, &ps);
 			}
 
 			if (!ctx->v4l_codec_ready)
@@ -1771,6 +1904,11 @@ static irqreturn_t vmpeg12_isr_thread_fn(struct vdec_s *vdec, int irq)
 		if (disp_pic->pts_valid)
 			hw->lastpts64 = disp_pic->pts64;
 
+		if (input_frame_based(hw_to_vdec(hw)))
+			frame_size = new_pic->frame_size;
+
+		fill_frame_info(hw, info, frame_size, new_pic->pts);
+
 		if ((hw->first_i_frame_ready == 0) &&
 			((info & PICINFO_TYPE_MASK) == PICINFO_TYPE_I) &&
 			((info & PICINFO_ERROR) == 0))
@@ -1797,7 +1935,7 @@ static irqreturn_t vmpeg12_isr(struct vdec_s *vdec, int irq)
 	info = READ_VREG(MREG_PIC_INFO);
 	offset = READ_VREG(MREG_FRAME_OFFSET);
 
-	vdec_count_info(&gvs, info & PICINFO_ERROR, offset);
+	vdec_count_info(&hw->gvs, info & PICINFO_ERROR, offset);
 
 	WRITE_VREG(ASSIST_MBOX1_CLR_REG, 1);
 
@@ -1893,7 +2031,6 @@ static int notify_v4l_eos(struct vdec_s *vdec)
 static void vmpeg12_work_implement(struct vdec_mpeg12_hw_s *hw,
 	struct vdec_s *vdec, int from)
 {
-	int r;
 	if (hw->dec_result != DEC_RESULT_DONE)
 		debug_print(DECODE_ID(hw), PRINT_FLAG_RUN_FLOW,
 			"%s, result=%d, status=%d\n", __func__,
@@ -1932,37 +2069,6 @@ static void vmpeg12_work_implement(struct vdec_mpeg12_hw_s *hw,
 		vdec_vframe_dirty(vdec, hw->chunk);
 		hw->chunk = NULL;
 		vdec_clean_input(vdec);
-
-		r = vdec_prepare_input(vdec, &hw->chunk);
-		if (r < 0) {
-			hw->input_empty++;
-			reset_process_time(hw);
-			hw->dec_result = DEC_RESULT_GET_DATA;
-			debug_print(DECODE_ID(hw), PRINT_FLAG_DEC_DETAIL,
-				"%s: Insufficient data, get data retry\n", __func__);
-			vdec_schedule_work(&hw->work);
-			return;
-		}
-		hw->input_empty = 0;
-		if (vdec_frame_based(vdec) && (hw->chunk != NULL)) {
-			r = hw->chunk->size +
-				(hw->chunk->offset & (VDEC_FIFO_ALIGN - 1));
-			WRITE_VREG(VIFF_BIT_CNT, r * 8);
-		}
-		debug_print(DECODE_ID(hw), PRINT_FLAG_VDEC_STATUS,
-			"%s: %x %x %x size %d, bitcnt %d\n",
-			__func__,
-			READ_VREG(VLD_MEM_VIFIFO_LEVEL),
-			READ_VREG(VLD_MEM_VIFIFO_WP),
-			READ_VREG(VLD_MEM_VIFIFO_RP),
-			r, READ_VREG(VIFF_BIT_CNT));
-		vdec_enable_input(vdec);
-		hw->dec_result = DEC_RESULT_NONE;
-		hw->last_vld_level = 0;
-		start_process_time_set(hw);
-		hw->init_flag = 1;
-		mod_timer(&hw->check_timer, jiffies + CHECK_INTERVAL);
-		WRITE_VREG(MREG_BUFFEROUT, 0);
 		return;
 	} else if (hw->dec_result == DEC_RESULT_FORCE_EXIT) {
 		debug_print(DECODE_ID(hw), PRINT_FLAG_ERROR,
@@ -1993,11 +2099,6 @@ static void vmpeg12_work_implement(struct vdec_mpeg12_hw_s *hw,
 		amvdec_stop();
 		hw->stat &= ~STAT_VDEC_RUN;
 	}
-	/*disable mbox interrupt */
-	WRITE_VREG(ASSIST_MBOX1_MASK, 0);
-	del_timer_sync(&hw->check_timer);
-	hw->stat &= ~STAT_TIMER_ARM;
-	wait_vmmpeg12_search_done(hw);
 
 	if (from == 1) {
 		/*This is a timeout work*/
@@ -2011,10 +2112,24 @@ static void vmpeg12_work_implement(struct vdec_mpeg12_hw_s *hw,
 		}
 	}
 
+	/*disable mbox interrupt */
+	WRITE_VREG(ASSIST_MBOX1_MASK, 0);
+	wait_vmmpeg12_search_done(hw);
 	if (vdec->parallel_dec == 1)
 		vdec_core_finish_run(vdec, CORE_MASK_VDEC_1);
 	else
 		vdec_core_finish_run(vdec, CORE_MASK_VDEC_1 | CORE_MASK_HEVC);
+	del_timer_sync(&hw->check_timer);
+	hw->stat &= ~STAT_TIMER_ARM;
+
+	if (hw->is_used_v4l) {
+		struct aml_vcodec_ctx *ctx =
+			(struct aml_vcodec_ctx *)(hw->v4l2_ctx);
+
+		if (ctx->param_sets_from_ucode &&
+			!hw->v4l_params_parsed)
+			vdec_v4l_write_frame_sync(ctx);
+	}
 
 	if (hw->vdec_cb)
 		hw->vdec_cb(vdec, hw->vdec_cb_arg);
@@ -2039,7 +2154,6 @@ static void vmpeg12_timeout_work(struct work_struct *work)
 		return;
 	}
 
-    hw->timeout_processing = 1;
 	vmpeg12_work_implement(hw, vdec, 1);
 }
 
@@ -2098,8 +2212,7 @@ static void vmpeg_vf_put(struct vframe_s *vf, void *op_arg)
 	hw->vfbuf_use[vf->index]--;
 	if  (hw->vfbuf_use[vf->index] < 0) {
 		debug_print(DECODE_ID(hw), PRINT_FLAG_ERROR,
-				"warn: vf %lx, index %d putback repetitive, set use to 0\n", (ulong)vf, vf->index);
-			hw->vfbuf_use[vf->index] = 0;
+			"warn: vf %lx, index %d putback repetitive\n", (ulong)vf, vf->index);
 	}
 	hw->put_num++;
 	debug_print(DECODE_ID(hw), PRINT_FLAG_RUN_FLOW,
@@ -2147,16 +2260,16 @@ static int vmmpeg12_dec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 		vstatus->frame_rate = -1;
 	vstatus->error_count = READ_VREG(AV_SCRATCH_C);
 	vstatus->status = hw->stat;
-	vstatus->bit_rate = gvs.bit_rate;
+	vstatus->bit_rate = hw->gvs.bit_rate;
 	vstatus->frame_dur = hw->frame_dur;
-	vstatus->frame_data = gvs.frame_data;
-	vstatus->total_data = gvs.total_data;
-	vstatus->frame_count = gvs.frame_count;
-	vstatus->error_frame_count = gvs.error_frame_count;
+	vstatus->frame_data = hw->gvs.frame_data;
+	vstatus->total_data = hw->gvs.total_data;
+	vstatus->frame_count = hw->gvs.frame_count;
+	vstatus->error_frame_count = hw->gvs.error_frame_count;
 	vstatus->drop_frame_count = hw->drop_frame_count;
-	vstatus->total_data = gvs.total_data;
-	vstatus->samp_cnt = gvs.samp_cnt;
-	vstatus->offset = gvs.offset;
+	vstatus->total_data = hw->gvs.total_data;
+	vstatus->samp_cnt = hw->gvs.samp_cnt;
+	vstatus->offset = hw->gvs.offset;
 	vstatus->ratio_control = hw->ratio_control;
 	snprintf(vstatus->vdec_name, sizeof(vstatus->vdec_name),
 			"%s", DRIVER_NAME);
@@ -2195,10 +2308,10 @@ static void vmpeg12_canvas_init(struct vdec_mpeg12_hw_s *hw)
 	for (i = 0; i < hw->buf_num + 1; i++) {
 		unsigned canvas;
 
-		if (i == (hw->buf_num)) /* SWAP&CCBUF&MATIRX&MV */
+		if (i == hw->buf_num) /* SWAP&CCBUF&MATIRX&MV */
 			decbuf_size = WORKSPACE_SIZE;
 
-		if (hw->is_used_v4l && !(i == (hw->buf_num))) {
+		if (hw->is_used_v4l && !(i == hw->buf_num)) {
 			continue;
 		} else {
 			ret = decoder_bmmu_box_alloc_buf_phy(hw->mm_blk_handle, i,
@@ -2210,7 +2323,7 @@ static void vmpeg12_canvas_init(struct vdec_mpeg12_hw_s *hw)
 			}
 		}
 
-		if (i == (hw->buf_num)) {
+		if (i == hw->buf_num) {
 			if (hw->ccbuf_phyAddress_is_remaped_nocache)
 				codec_mm_unmap_phyaddr(hw->ccbuf_phyAddress_virt);
 			hw->ccbuf_phyAddress_virt = NULL;
@@ -2290,7 +2403,7 @@ static void vmpeg2_dump_state(struct vdec_s *vdec)
 	debug_print(DECODE_ID(hw), 0,
 		"====== %s\n", __func__);
 	debug_print(DECODE_ID(hw), 0,
-		"width/height (%d/%d),i_first %d buf_num %d\n",
+		"width/height (%d/%d),i_first %d, buf_num %d\n",
 		hw->frame_width,
 		hw->frame_height,
 		hw->first_i_frame_ready,
@@ -2403,23 +2516,17 @@ static void reset_process_time(struct vdec_mpeg12_hw_s *hw)
 			max_process_time[DECODE_ID(hw)] = process_time;
 	}
 }
-static void start_process_time_set(struct vdec_mpeg12_hw_s *hw)
+static void start_process_time(struct vdec_mpeg12_hw_s *hw)
 {
-	if ((hw->refs[1] != -1) && (hw->refs[0] == -1))
-		hw->decode_timeout_count = 1;
-	else
-		hw->decode_timeout_count = 10;
+	hw->decode_timeout_count = 10;
 	hw->start_process_time = jiffies;
 }
 static void timeout_process(struct vdec_mpeg12_hw_s *hw)
 {
 	struct vdec_s *vdec = hw_to_vdec(hw);
 
-	if (work_pending(&hw->work) ||
-	    work_busy(&hw->work) ||
-	    work_busy(&hw->timeout_work) ||
-	    work_pending(&hw->timeout_work)) {
-		pr_err("%s mpeg12[%d] timeout_process return befor do anything.\n",__func__, vdec->id);
+	if (work_pending(&hw->work)) {
+		pr_err("timeout_process return befor do anything.");
 		return;
 	}
 	reset_process_time(hw);
@@ -2428,15 +2535,14 @@ static void timeout_process(struct vdec_mpeg12_hw_s *hw)
 		"%s decoder timeout, status=%d, level=%d\n",
 		__func__, vdec->status, READ_VREG(VLD_MEM_VIFIFO_LEVEL));
 	hw->dec_result = DEC_RESULT_DONE;
-	if ((hw->refs[1] != -1) && (hw->refs[0] != -1))
-		hw->first_i_frame_ready = 0;
+	hw->first_i_frame_ready = 0;
 
 	/*
 	 * In this very timeout point,the vmpeg12_work arrives,
 	 * let it to handle the scenario.
 	 */
 	if (work_pending(&hw->work)) {
-		pr_err("%s mpeg12[%d] return befor schedule.", __func__, vdec->id);
+		pr_err("timeout_process return befor schedule.");
 		return;
 	}
 	vdec_schedule_work(&hw->timeout_work);
@@ -2484,15 +2590,17 @@ static void check_timer_func(unsigned long arg)
 
 static int vmpeg12_hw_ctx_restore(struct vdec_mpeg12_hw_s *hw)
 {
-	int index = -1, i;
+	u32 index, i;
+	struct aml_vcodec_ctx * v4l2_ctx = hw->v4l2_ctx;
+
 	index = find_free_buffer(hw);
 	if (index < 0 || index >= hw->buf_num)
 		return -1;
 	if (!hw->init_flag)
 		vmpeg12_canvas_init(hw);
 	else {
+		WRITE_VREG(MREG_CO_MV_START, hw->buf_start);
 		if (!hw->is_used_v4l) {
-			WRITE_VREG(MREG_CO_MV_START, hw->buf_start);
 			for (i = 0; i < hw->buf_num; i++) {
 				canvas_config_config(canvas_y(hw->canvas_spec[i]),
 					&hw->canvas_config[i][0]);
@@ -2562,6 +2670,13 @@ static int vmpeg12_hw_ctx_restore(struct vdec_mpeg12_hw_s *hw)
 	WRITE_VREG(VCOP_CTRL_REG, hw->reg_vcop_ctrl_reg);
 	WRITE_VREG(AV_SCRATCH_H, hw->reg_signal_type);
 
+	if (READ_VREG(MREG_ERROR_COUNT) != 0 ||
+			READ_VREG(MREG_FATAL_ERROR) != 0)
+		debug_print(DECODE_ID(hw), PRINT_FLAG_RESTORE,
+				"err_cnt:%d fa_err:%d\n",
+				READ_VREG(MREG_ERROR_COUNT),
+				READ_VREG(MREG_FATAL_ERROR));
+
 	/* clear error count */
 	WRITE_VREG(MREG_ERROR_COUNT, 0);
 	WRITE_VREG(MREG_FATAL_ERROR, 0);
@@ -2570,6 +2685,13 @@ static int vmpeg12_hw_ctx_restore(struct vdec_mpeg12_hw_s *hw)
 #ifdef NV21
 	SET_VREG_MASK(MDEC_PIC_DC_CTRL, 1<<17);
 #endif
+
+	/* cbcr_merge_swap_en */
+	if (hw->is_used_v4l
+		&& (v4l2_ctx->q_data[AML_Q_DATA_DST].fmt->fourcc == V4L2_PIX_FMT_NV21
+		|| v4l2_ctx->q_data[AML_Q_DATA_DST].fmt->fourcc == V4L2_PIX_FMT_NV21M))
+		SET_VREG_MASK(MDEC_PIC_DC_CTRL, 1 << 16);
+
 	if (!hw->ctx_valid)
 		WRITE_VREG(AV_SCRATCH_J, hw->userdata_wp_ctx);
 
@@ -2638,6 +2760,7 @@ static void vmpeg12_local_init(struct vdec_mpeg12_hw_s *hw)
 	hw->start_process_time = 0;
 	hw->init_flag = 0;
 	hw->error_frame_skip_level = error_frame_skip_level;
+
 	if (dec_control)
 		hw->dec_control = dec_control;
 }
@@ -2684,7 +2807,7 @@ static s32 vmpeg12_init(struct vdec_mpeg12_hw_s *hw)
 			hw->user_data_buffer,
 			USER_DATA_SIZE);
 
-	//amvdec_enable();
+	amvdec_enable();
 	init_timer(&hw->check_timer);
 	hw->check_timer.data = (unsigned long)hw;
 	hw->check_timer.function = check_timer_func;
@@ -2705,14 +2828,6 @@ static unsigned long run_ready(struct vdec_s *vdec, unsigned long mask)
 		(struct vdec_mpeg12_hw_s *)vdec->private;
 	if (hw->eos)
 		return 0;
-	if (hw->timeout_processing &&
-	    (work_pending(&hw->work) || work_busy(&hw->work) ||
-	    work_pending(&hw->timeout_work) || work_busy(&hw->timeout_work))) {
-		debug_print(DECODE_ID(hw), PRINT_FLAG_VDEC_STATUS,
-			"mpeg12 work pending,not ready for run.\n");
-		return 0;
-	}	
-	hw->timeout_processing = 0;		
 	if (vdec_stream_based(vdec) && (hw->init_flag == 0)
 		&& pre_decode_buf_level != 0) {
 		u32 rp, wp, level;
@@ -2787,13 +2902,8 @@ void (*callback)(struct vdec_s *, void *),
 {
 	struct vdec_mpeg12_hw_s *hw =
 		(struct vdec_mpeg12_hw_s *)vdec->private;
-	int save_reg;
+	int save_reg = READ_VREG(POWER_CTL_VLD);
 	int size, ret;
-	if (!hw->vdec_pg_enable_flag) {
-		hw->vdec_pg_enable_flag = 1;
-		amvdec_enable();
-	}
-	save_reg = READ_VREG(POWER_CTL_VLD);	
 	/* reset everything except DOS_TOP[1] and APB_CBUS[0]*/
 	WRITE_VREG(DOS_SW_RESET0, 0xfffffff0);
 	WRITE_VREG(DOS_SW_RESET0, 0);
@@ -2813,22 +2923,27 @@ void (*callback)(struct vdec_s *, void *),
 	if (size < 0) {
 		hw->input_empty++;
 		hw->dec_result = DEC_RESULT_AGAIN;
+
+		debug_print(DECODE_ID(hw), PRINT_FLAG_DEC_DETAIL,
+			"vdec_prepare_input: Insufficient data\n");
 		vdec_schedule_work(&hw->work);
 		return;
 	}
 
-	hw->input_empty = 0;
-	if ((vdec_frame_based(vdec)) &&
-		(hw->chunk != NULL)) {
-		size = hw->chunk->size +
-			(hw->chunk->offset & (VDEC_FIFO_ALIGN - 1));
-		WRITE_VREG(VIFF_BIT_CNT, size * 8);
+	if (vdec_frame_based(vdec) && !vdec_secure(vdec)) {
+		/* HW needs padding (NAL start) for frame ending */
+		char* tail = (char *)hw->chunk->block->start_virt;
+
+		tail += hw->chunk->offset + hw->chunk->size;
+		tail[0] = 0;
+		tail[1] = 0;
+		tail[2] = 1;
+		tail[3] = 0;
+		codec_mm_dma_flush(tail, 4, DMA_TO_DEVICE);
 	}
 
-	if (vdec_frame_based(vdec) && debug_enable && !vdec_secure(vdec)) {
+	if (vdec_frame_based(vdec) && debug_enable) {
 		u8 *data = NULL;
-
-
 		if (hw->chunk)
 			debug_print(DECODE_ID(hw), PRINT_FLAG_RUN_FLOW,
 				"run: chunk offset 0x%x, size %d\n",
@@ -2854,32 +2969,42 @@ void (*callback)(struct vdec_s *, void *),
 		if (debug_enable & PRINT_FRAMEBASE_DATA
 			) {
 			int jj;
-			debug_print(DECODE_ID(hw), PRINT_FRAMEBASE_DATA,
-				"frame data:\n");
+
 			for (jj = 0; jj < size; jj++) {
 				if ((jj & 0xf) == 0)
-					pr_info("%06x:", jj);
-				pr_info("%02x ", data[jj]);
+					debug_print(DECODE_ID(hw),
+					PRINT_FRAMEBASE_DATA,
+						"%06x:", jj);
+				debug_print(DECODE_ID(hw),
+				PRINT_FRAMEBASE_DATA,
+					"%02x ", data[jj]);
 				if (((jj + 1) & 0xf) == 0)
-					pr_info("\n");
+					debug_print(DECODE_ID(hw),
+					PRINT_FRAMEBASE_DATA,
+						"\n");
 			}
-			pr_info("\n");
 		}
 
 		if (!hw->chunk->block->is_mapped)
 			codec_mm_unmap_phyaddr(data);
-	} else {
+	} else
 		debug_print(DECODE_ID(hw), PRINT_FLAG_VDEC_STATUS,
-			"%s: %x %x %x %x %x size 0x%x, bitcnt %d\n",
+			"%s: %x %x %x %x %x size 0x%x\n",
 			__func__,
 			READ_VREG(VLD_MEM_VIFIFO_LEVEL),
 			READ_VREG(VLD_MEM_VIFIFO_WP),
 			READ_VREG(VLD_MEM_VIFIFO_RP),
 			READ_PARSER_REG(PARSER_VIDEO_RP),
 			READ_PARSER_REG(PARSER_VIDEO_WP),
-			size, READ_VREG(VIFF_BIT_CNT));
-	}
+			size);
 
+	if (vdec->mvfrm && hw->chunk)
+		vdec->mvfrm->frame_size = hw->chunk->size;
+
+	hw->input_empty = 0;
+	vdec_enable_input(vdec);
+
+	hw->dec_result = DEC_RESULT_NONE;
 	if (vdec->mc_loaded) {
 	/*firmware have load before,
 	  and not changes to another.
@@ -2906,11 +3031,11 @@ void (*callback)(struct vdec_s *, void *),
 		return;
 	}
 	/*wmb();*/
-	hw->dec_result = DEC_RESULT_NONE;
 	hw->stat |= STAT_MC_LOAD;
-	vdec_enable_input(vdec);
 	hw->last_vld_level = 0;
-	start_process_time_set(hw);
+	start_process_time(hw);
+	if (vdec->mvfrm)
+		vdec->mvfrm->hw_decode_start = local_clock();
 	amvdec_start();
 	hw->stat |= STAT_VDEC_RUN;
 	hw->init_flag = 1;
@@ -2990,26 +3115,35 @@ static int ammvdec_mpeg12_probe(struct platform_device *pdev)
 	}
 	vf_provider_init(&pdata->vframe_provider, pdata->vf_provider_name,
 		&vf_provider_ops, pdata);
-	if (((debug_enable & IGNORE_PARAM_FROM_CONFIG) == 0) && pdata->config_len) {
-		debug_print(DECODE_ID(hw), 0, "pdata->config: %s\n", pdata->config);
-		if (get_config_int(pdata->config, "parm_v4l_buffer_margin",
-			&config_val) == 0)
-			hw->dynamic_buf_num_margin = config_val;
-		else
-			hw->dynamic_buf_num_margin = dynamic_buf_num_margin;
-	} else {
-		hw->dynamic_buf_num_margin = dynamic_buf_num_margin;
-	}
-	hw->buf_num = vmpeg12_get_buf_num(hw);
 
 	if (pdata->parallel_dec == 1) {
 		int i;
 		for (i = 0; i < DECODE_BUFFER_NUM_MAX; i++)
 			hw->canvas_spec[i] = 0xffffff;
 	}
-
 	platform_set_drvdata(pdev, pdata);
+
+	hw->dynamic_buf_num_margin = dynamic_buf_num_margin;
 	hw->canvas_mode = pdata->canvas_mode;
+	if (pdata->config_len) {
+		if (get_config_int(pdata->config,
+			"parm_v4l_codec_enable",
+			&config_val) == 0)
+			hw->is_used_v4l = config_val;
+
+		if (get_config_int(pdata->config,
+			"parm_v4l_canvas_mem_mode",
+			&config_val) == 0)
+			hw->canvas_mode = config_val;
+
+		if ((debug_enable & IGNORE_PARAM_FROM_CONFIG) == 0 &&
+			get_config_int(pdata->config,
+			"parm_v4l_buffer_margin",
+			&config_val) == 0)
+			hw->dynamic_buf_num_margin= config_val;
+	}
+
+	hw->buf_num = vmpeg12_get_buf_num(hw);
 	hw->platform_dev = pdev;
 
 	hw->tvp_flag = vdec_secure(pdata) ? CODEC_MM_FLAGS_TVP : 0;
@@ -3034,6 +3168,8 @@ static int ammvdec_mpeg12_probe(struct platform_device *pdev)
 	}
 	vdec_set_prepare_level(pdata, start_decode_buf_level);
 
+	vdec_set_vframe_comm(pdata, DRIVER_NAME);
+
 	if (pdata->parallel_dec == 1)
 		vdec_core_request(pdata, CORE_MASK_VDEC_1);
 	else {
@@ -3044,9 +3180,6 @@ static int ammvdec_mpeg12_probe(struct platform_device *pdev)
 	amvdec_mmpeg12_init_userdata_dump(hw);
 	reset_user_data_buf(hw);
 #endif
-
-	hw->is_used_v4l = (((unsigned long)
-		hw->vmpeg12_amstream_dec_info.param & 0x80) >> 7);
 
 	/*INIT_WORK(&userdata_push_work, userdata_push_do_work);*/
 	return 0;
@@ -3122,7 +3255,6 @@ static int ammvdec_mpeg12_remove(struct platform_device *pdev)
 		hw = NULL;
 	}
 	pr_info("ammvdec_mpeg12 removed.\n");
-	memset(&gvs, 0x0, sizeof(gvs));
 
 	return 0;
 }

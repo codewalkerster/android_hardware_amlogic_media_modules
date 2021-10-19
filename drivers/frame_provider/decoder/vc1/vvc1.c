@@ -46,7 +46,6 @@
 #include "../../../common/chips/decoder_cpu_ver_info.h"
 
 
-
 #define DRIVER_NAME "amvdec_vc1"
 #define MODULE_NAME "amvdec_vc1"
 
@@ -497,7 +496,6 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 				decoder_bmmu_box_get_mem_handle(
 					mm_blk_handle,
 					buffer_index);
-
 			kfifo_put(&display_q, (const struct vframe_s *)vf);
 			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
@@ -557,7 +555,6 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 				decoder_bmmu_box_get_mem_handle(
 					mm_blk_handle,
 					buffer_index);
-
 			kfifo_put(&display_q, (const struct vframe_s *)vf);
 			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
@@ -643,6 +640,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 				decoder_bmmu_box_get_mem_handle(
 					mm_blk_handle,
 					buffer_index);
+
 			kfifo_put(&display_q, (const struct vframe_s *)vf);
 			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 

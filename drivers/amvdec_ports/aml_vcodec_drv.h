@@ -26,6 +26,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-core.h>
+#include <linux/amlogic/media/vfm/vframe.h>
 #include "aml_vcodec_util.h"
 
 #define AML_VCODEC_DRV_NAME	"aml_vcodec_drv"
@@ -36,6 +37,36 @@
 #define AML_VCODEC_MAX_PLANES	3
 #define AML_V4L2_BENCHMARK	0
 #define WAIT_INTR_TIMEOUT_MS	1000
+
+/* codec types of get/set parms. */
+#define V4L2_CONFIG_PARM_ENCODE		(0)
+#define V4L2_CONFIG_PARM_DECODE		(1)
+
+/* types of decode parms. */
+#define V4L2_CONFIG_PARM_DECODE_CFGINFO	(1 << 0)
+#define V4L2_CONFIG_PARM_DECODE_PSINFO	(1 << 1)
+#define V4L2_CONFIG_PARM_DECODE_HDRINFO	(1 << 2)
+#define V4L2_CONFIG_PARM_DECODE_CNTINFO	(1 << 3)
+
+/* amlogic event define. */
+/* #define V4L2_EVENT_SRC_CH_RESOLUTION	(1 << 0) */
+#define V4L2_EVENT_SRC_CH_HDRINFO	(1 << 1)
+#define V4L2_EVENT_SRC_CH_PSINFO	(1 << 2)
+#define V4L2_EVENT_SRC_CH_CNTINFO	(1 << 3)
+
+/* exception handing */
+#define V4L2_EVENT_REQUEST_RESET	(1 << 8)
+#define V4L2_EVENT_REQUEST_EXIT		(1 << 9)
+
+/* v4l buffer pool */
+#define V4L_CAP_BUFF_MAX		(32)
+#define V4L_CAP_BUFF_INVALID		(0)
+#define V4L_CAP_BUFF_IN_M2M		(1)
+#define V4L_CAP_BUFF_IN_DEC		(2)
+
+/* v4l reset mode */
+#define V4L_RESET_MODE_NORMAL		(1 << 0) /* reset vdec_input and decoder. */
+#define V4L_RESET_MODE_LIGHT		(1 << 1) /* just only reset decoder. */
 
 /**
  * enum aml_hw_reg_idx - AML hw register base index
@@ -136,6 +167,7 @@ enum aml_q_type {
 	AML_Q_DATA_DST = 1,
 };
 
+
 /**
  * struct aml_q_data - Structure used to store information about queue
  */
@@ -233,6 +265,87 @@ struct vdec_pic_info {
 	unsigned int c_bs_sz;
 	unsigned int y_len_sz;
 	unsigned int c_len_sz;
+	int profile_idc;
+	int ref_frame_count;
+};
+
+struct aml_vdec_cfg_infos {
+	u32 double_write_mode;
+	u32 init_width;
+	u32 init_height;
+	u32 ref_buf_margin;
+	u32 canvas_mem_mode;
+	u32 canvas_mem_endian;
+};
+
+struct aml_vdec_hdr_infos {
+	/*
+	 * bit 29   : present_flag
+	 * bit 28-26: video_format "component", "PAL", "NTSC", "SECAM", "MAC", "unspecified"
+	 * bit 25   : range "limited", "full_range"
+	 * bit 24   : color_description_present_flag
+	 * bit 23-16: color_primaries "unknown", "bt709", "undef", "bt601",
+	 *            "bt470m", "bt470bg", "smpte170m", "smpte240m", "film", "bt2020"
+	 * bit 15-8 : transfer_characteristic unknown", "bt709", "undef", "bt601",
+	 *            "bt470m", "bt470bg", "smpte170m", "smpte240m",
+	 *            "linear", "log100", "log316", "iec61966-2-4",
+	 *            "bt1361e", "iec61966-2-1", "bt2020-10", "bt2020-12",
+	 *            "smpte-st-2084", "smpte-st-428"
+	 * bit 7-0  : matrix_coefficient "GBR", "bt709", "undef", "bt601",
+	 *            "fcc", "bt470bg", "smpte170m", "smpte240m",
+	 *            "YCgCo", "bt2020nc", "bt2020c"
+	 */
+	u32 signal_type;
+	struct vframe_master_display_colour_s color_parms;
+};
+
+struct aml_vdec_ps_infos {
+	u32 visible_width;
+	u32 visible_height;
+	u32 coded_width;
+	u32 coded_height;
+	u32 profile;
+	u32 mb_width;
+	u32 mb_height;
+	u32 dpb_size;
+	u32 ref_frames;
+	u32 reorder_frames;
+};
+
+struct aml_vdec_cnt_infos {
+	u32 bit_rate;
+	u32 frame_count;
+	u32 error_frame_count;
+	u32 drop_frame_count;
+	u32 total_data;
+};
+
+struct aml_dec_params {
+	u32 parms_status;
+	struct aml_vdec_cfg_infos	cfg;
+	struct aml_vdec_ps_infos	ps;
+	struct aml_vdec_hdr_infos	hdr;
+	struct aml_vdec_cnt_infos	cnt;
+};
+
+struct v4l2_config_parm {
+	u32 type;
+	u32 length;
+	union {
+		struct aml_dec_params dec;
+		struct aml_enc_params enc;
+		u8 data[200];
+	} parm;
+	u8 buf[4096];
+};
+
+struct v4l_buff_pool {
+	/*
+	 * bit 31-16: buffer state
+	 * bit 15- 0: buffer index
+	 */
+	u32 seq[V4L_CAP_BUFF_MAX];
+	u32 in, out;
 };
 
 enum aml_thread_type {
@@ -335,17 +448,23 @@ struct aml_vcodec_ctx {
 	struct mutex lock;
 	struct completion comp;
 	bool has_receive_eos;
-	struct list_head capture_list;
 	struct list_head vdec_thread_list;
 	bool is_drm_mode;
 	bool is_stream_mode;
 	int buf_used_count;
 	bool receive_cmd_stop;
-	bool scatter_mem_enable;
 	bool param_sets_from_ucode;
 	bool v4l_codec_ready;
+	bool v4l_codec_dpb_ready;
 	wait_queue_head_t wq;
 	spinlock_t slock;
+	struct v4l2_config_parm config;
+	bool is_stream_off;
+	int reset_flag;
+	int stop_cmd;
+	u32 display_count;
+	struct v4l_buff_pool cap_pool;
+	u32 cap_pix_fmt;
 };
 
 /**

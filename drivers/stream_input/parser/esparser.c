@@ -810,7 +810,7 @@ ssize_t drm_write(struct file *file, struct stream_buf_s *stbuf,
 
 	len = realcount;
 	count = realcount;
-	totalcount = realcount;	
+	totalcount = realcount;
 
 	while (len > 0) {
 		if (stbuf->type != BUF_TYPE_SUBTITLE

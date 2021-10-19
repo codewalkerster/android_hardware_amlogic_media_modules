@@ -34,7 +34,6 @@
 
 #include "vdec_input.h"
 #include "frame_check.h"
-#include "vdec_sync.h"
 
 s32 vdec_dev_register(void);
 s32 vdec_dev_unregister(void);
@@ -122,7 +121,13 @@ extern void dma_contiguous_early_fixup(phys_addr_t base, unsigned long size);
 unsigned int get_vdec_clk_config_settings(void);
 void update_vdec_clk_config_settings(unsigned int config);
 //unsigned int get_mmu_mode(void);//DEBUG_TMP
-extern void vdec_fill_frame_info(struct vframe_qos_s *vframe_qos, int debug);
+//extern void vdec_fill_frame_info(struct vframe_qos_s *vframe_qos, int debug);
+extern void vdec_fill_vdec_frame(struct vdec_s *vdec,
+				struct vframe_qos_s *vframe_qos,
+				struct vdec_info *vinfo,
+				struct vframe_s *vf, u32 hw_dec_time);
+extern void vdec_set_vframe_comm(struct vdec_s *vdec, char *n);
+
 
 struct vdec_s;
 enum vformat_t;
@@ -260,10 +265,11 @@ struct vdec_s {
 	u64 run_clk[VDEC_MAX];
 	u64 start_run_clk[VDEC_MAX];
 #endif
-	u64 irq_thread_cnt;
-	u64 irq_cnt;
+	atomic_t inirq_thread_flag;
+	atomic_t inirq_flag;
+	atomic_t inrelease;
 	int parallel_dec;
-	struct vdec_sync sync;
+	struct vdec_frames_s *mvfrm;
 };
 
 /* common decoder vframe provider name to use default vfm path */
@@ -316,6 +322,9 @@ extern int vdec_set_receive_id(struct vdec_s *vdec, int receive_id);
 extern int vdec_write_vframe(struct vdec_s *vdec, const char *buf,
 				size_t count);
 
+extern int vdec_write_vframe_with_dma(struct vdec_s *vdec,
+	ulong addr, size_t count, u32 handle);
+
 /* mark the vframe_chunk as consumed */
 extern void vdec_vframe_dirty(struct vdec_s *vdec,
 				struct vframe_chunk_s *chunk);
@@ -359,6 +368,8 @@ extern int vdec_destroy(struct vdec_s *vdec);
 
 /* reset vdec */
 extern int vdec_reset(struct vdec_s *vdec);
+
+extern int vdec_v4l2_reset(struct vdec_s *vdec, int flag);
 
 extern void vdec_set_status(struct vdec_s *vdec, int status);
 
@@ -445,7 +456,7 @@ int vdec_get_status(struct vdec_s *vdec);
 
 void vdec_set_timestamp(struct vdec_s *vdec, u64 timestamp);
 
-extern struct vframe_qos_s *vdec_get_qos_info(void);
+extern u32  vdec_get_frame_vdec(struct vdec_s *vdec,  struct vframe_counter_s *tmpbuf);
 
 int vdec_get_frame_num(struct vdec_s *vdec);
 

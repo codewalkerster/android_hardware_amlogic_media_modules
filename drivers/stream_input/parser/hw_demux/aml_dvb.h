@@ -276,7 +276,6 @@ struct aml_asyncfifo {
 	struct tasklet_struct     asyncfifo_tasklet;
 	struct aml_dvb *dvb;
 	struct aml_dvr_block blk;
-	unsigned long stored_pages;
 };
 
 enum{

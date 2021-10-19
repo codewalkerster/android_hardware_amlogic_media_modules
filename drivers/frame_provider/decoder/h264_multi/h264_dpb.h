@@ -377,12 +377,6 @@ union param {
 		unsigned short colocated_mv_addr_start[2];
 		unsigned short colocated_mv_addr_end[2];
 		unsigned short colocated_mv_wr_addr[2];
-
-		unsigned short frame_crop_left_offset;
-		unsigned short frame_crop_right_offset;
-		unsigned short frame_crop_top_offset;
-		unsigned short frame_crop_bottom_offset;
-		unsigned short chroma_format_idc;
 	} dpb;
 	struct {
 		unsigned short dump[MMCO_OFFSET];
@@ -493,7 +487,6 @@ struct SPSParameters {
 	int max_dpb_size;
 
 	int log2_max_frame_num_minus4;
-	int frame_num_gap_allowed;
 };
 
 #define DEC_REF_PIC_MARKING_BUFFER_NUM_MAX   45
@@ -740,7 +733,6 @@ struct StorablePicture {
 	int max_mv;
 	int min_mv;
 	int avg_mv;
-	u32 pic_size;
 };
 
 struct FrameStore {
@@ -819,9 +811,8 @@ struct FrameStore {
 	int min_mv;
 	int avg_mv;
 	int dpb_frame_count;
-	bool show_frame;
-	struct fence *fence;
-	u32 decoded_frame_size;
+	u32 hw_decode_time;
+	u32 frame_size2; // For recording the chunk->size in frame mode
 };
 
 
@@ -907,12 +898,6 @@ struct h264_dpb_stru {
 	u16 num_reorder_frames;
 	u16 max_dec_frame_buffering;
 
-	unsigned int frame_crop_left_offset;
-	unsigned int frame_crop_right_offset;
-	unsigned int frame_crop_top_offset;
-	unsigned int frame_crop_bottom_offset;
-	unsigned int chroma_format_idc;
-
 	unsigned int dec_dpb_status;
 	unsigned int last_dpb_status;
 	unsigned char buf_alloc_fail;
@@ -979,8 +964,6 @@ void dump_dpb(struct DecodedPictureBuffer *p_Dpb, u8 force);
 
 void dump_pic(struct h264_dpb_stru *p_H264_Dpb);
 
-void * vh264_get_bufspec_lock(struct vdec_s *vdec);
-
 enum PictureStructure get_cur_slice_picture_struct(
 	struct h264_dpb_stru *p_H264_Dpb);
 
@@ -989,9 +972,5 @@ int dpb_check_ref_list_error(
 
 void unmark_for_reference(struct DecodedPictureBuffer *p_Dpb,
 	struct FrameStore *fs);
-
-int post_picture_early(struct vdec_s *vdec, int index);
-
-void update_ref_list(struct DecodedPictureBuffer *p_Dpb);
 
 #endif

@@ -524,7 +524,6 @@ static void vavs_isr(void)
 			pic_type = 2;
 			if ((picture_type == I_PICTURE) && pts_valid) {
 				vf->pts = pts;
-				vf->pts_us64 = pts_us64;
 				if ((repeat_count > 1) && avi_flag) {
 					/* next_pts = pts +
 					 *   (vavs_amstream_dec_info.rate *
@@ -538,9 +537,6 @@ static void vavs_isr(void)
 					next_pts = 0;
 			} else {
 				vf->pts = next_pts;
-				if (vf->pts == 0) {
-					vf->pts_us64 = 0;
-				}
 				if ((repeat_count > 1) && avi_flag) {
 					/* vf->duration =
 					 *   vavs_amstream_dec_info.rate *
@@ -582,11 +578,8 @@ static void vavs_isr(void)
 				pr_info("buffer_index %d, canvas addr %x\n",
 					   buffer_index, vf->canvas0Addr);
 			}
-
-			vf->pts = (pts_valid)?pts:0;
-			/*
-			*vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
-			*/
+			 vf->pts = (pts_valid)?pts:0;
+			vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
 			vfbuf_use[buffer_index]++;
 			vf->mem_handle =
 				decoder_bmmu_box_get_mem_handle(
@@ -610,9 +603,7 @@ static void vavs_isr(void)
 				vf->pts = 0;
 			else
 			vf->pts = next_pts;
-			if (vf->pts == 0) {
-				vf->pts_us64 = 0;
-			}
+
 			if ((repeat_count > 1) && avi_flag) {
 				/* vf->duration = vavs_amstream_dec_info.rate *
 				 *   repeat_count >> 1;
@@ -653,7 +644,6 @@ static void vavs_isr(void)
 				decoder_bmmu_box_get_mem_handle(
 					mm_blk_handle,
 					buffer_index);
-
 			kfifo_put(&display_q,
 					  (const struct vframe_s *)vf);
 			ATRACE_COUNTER(MODULE_NAME, vf->pts);
@@ -691,9 +681,6 @@ static void vavs_isr(void)
 					next_pts = 0;
 			} else {
 				vf->pts = next_pts;
-				if (vf->pts == 0) {
-					vf->pts_us64 = 0;
-				}
 				if ((repeat_count > 1) && avi_flag) {
 					/* vf->duration =
 					 *   vavs_amstream_dec_info.rate *
@@ -724,9 +711,7 @@ static void vavs_isr(void)
 				index2canvas(buffer_index);
 			vf->type_original = vf->type;
 			vf->pts = (pts_valid)?pts:0;
-			/*
-			*vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
-			*/
+			vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
 			if (debug_flag & AVS_DEBUG_PRINT) {
 				pr_info("buffer_index %d, canvas addr %x\n",
 					   buffer_index, vf->canvas0Addr
@@ -741,6 +726,7 @@ static void vavs_isr(void)
 					mm_blk_handle,
 					buffer_index);
 			decoder_do_frame_check(NULL, vf);
+
 			kfifo_put(&display_q,
 					  (const struct vframe_s *)vf);
 			ATRACE_COUNTER(MODULE_NAME, vf->pts);
@@ -1191,6 +1177,7 @@ static void vavs_local_init(bool is_reset)
 #ifdef DEBUG_PTS
 	pts_hit = pts_missed = pts_i_hit = pts_i_missed = 0;
 #endif
+
 	if (!is_reset) {
 		INIT_KFIFO(display_q);
 		INIT_KFIFO(recycle_q);
@@ -1423,7 +1410,6 @@ static void vavs_put_timer_func(unsigned long arg)
 				kfifo_put(&newframe_q,
 						  (const struct vframe_s *)vf);
 		}
-
 	}
 
 	if (frame_dur > 0 && saved_resolution !=
@@ -1716,14 +1702,6 @@ static int amvdec_avs_probe(struct platform_device *pdev)
 
 	INIT_WORK(&set_clk_work, avs_set_clk);
 	vdec = pdata;
-
-	INIT_WORK(&fatal_error_wd_work, vavs_fatal_error_handler);
-	atomic_set(&error_handler_run, 0);
-
-	INIT_WORK(&userdata_push_work, userdata_push_do_work);
-
-	INIT_WORK(&notify_work, vavs_notify_work);
-
 	if (vavs_init() < 0) {
 		pr_info("amvdec_avs init failed.\n");
 		kfree(gvs);

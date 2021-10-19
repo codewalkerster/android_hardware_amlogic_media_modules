@@ -280,6 +280,7 @@ static irqreturn_t vmjpeg_isr_thread_fn(struct vdec_s *vdec, int irq)
 	u64 pts_us64;
 	u32 frame_size;
 
+	reset_process_time(hw);
 	if (READ_VREG(AV_SCRATCH_D) != 0 &&
 		(debug_enable & PRINT_FLAG_UCODE_DETAIL)) {
 		pr_info("dbg%x: %x\n", READ_VREG(AV_SCRATCH_D),
@@ -287,7 +288,6 @@ static irqreturn_t vmjpeg_isr_thread_fn(struct vdec_s *vdec, int irq)
 		WRITE_VREG(AV_SCRATCH_D, 0);
 		return IRQ_HANDLED;
 	}
-	reset_process_time(hw);
 
 	reg = READ_VREG(MREG_FROM_AMRISC);
 	index = READ_VREG(AV_SCRATCH_5);
@@ -308,15 +308,15 @@ static irqreturn_t vmjpeg_isr_thread_fn(struct vdec_s *vdec, int irq)
 			(struct aml_vcodec_ctx *)(hw->v4l2_ctx);
 
 		if (ctx->param_sets_from_ucode && !hw->v4l_params_parsed) {
-			struct aml_vdec_pic_infos info;
+			struct aml_vdec_ps_infos ps;
 
-			info.visible_width	= hw->frame_width;
-			info.visible_height	= hw->frame_height;
-			info.coded_width	= ALIGN(hw->frame_width, 64);
-			info.coded_height	= ALIGN(hw->frame_height, 64);
-			info.dpb_size		= hw->buf_num;
+			ps.visible_width	= hw->frame_width;
+			ps.visible_height	= hw->frame_height;
+			ps.coded_width		= ALIGN(hw->frame_width, 64);
+			ps.coded_height		= ALIGN(hw->frame_height, 64);
+			ps.dpb_size		= hw->buf_num;
 			hw->v4l_params_parsed	= true;
-			vdec_v4l_set_pic_infos(ctx, &info);
+			vdec_v4l_set_ps_infos(ctx, &ps);
 		}
 
 		if (!ctx->v4l_codec_ready)
@@ -326,11 +326,6 @@ static irqreturn_t vmjpeg_isr_thread_fn(struct vdec_s *vdec, int irq)
 	if (hw->is_used_v4l) {
 		vf->v4l_mem_handle
 			= hw->buffer_spec[index].v4l_ref_buf_addr;
-		if (vdec_v4l_binding_fd_and_vf(vf->v4l_mem_handle, vf) < 0) {
-			mmjpeg_debug_print(DECODE_ID(hw), PRINT_FLAG_V4L_DETAIL,
-				"v4l: binding vf fail.\n");
-			return -1;
-		}
 		mmjpeg_debug_print(DECODE_ID(hw), PRINT_FLAG_V4L_DETAIL,
 			"[%d] %s(), v4l mem handle: 0x%lx\n",
 			((struct aml_vcodec_ctx *)(hw->v4l2_ctx))->id,
@@ -423,10 +418,6 @@ static void vmjpeg_vf_put(struct vframe_s *vf, void *op_arg)
 {
 	struct vdec_s *vdec = op_arg;
 	struct vdec_mjpeg_hw_s *hw = (struct vdec_mjpeg_hw_s *)vdec->private;
-
-	if (!vf)
-		return;
-
 	mmjpeg_debug_print(DECODE_ID(hw), PRINT_FRAME_NUM,
 		"%s:put_num:%d\n", __func__, hw->put_num);
 	hw->vfbuf_use[vf->index]--;
@@ -824,6 +815,8 @@ static void check_timer_func(unsigned long arg)
 	}
 
 	if (((debug_enable & PRINT_FLAG_TIMEOUT_STATUS) == 0) &&
+		(input_frame_based(vdec) ||
+		((u32)READ_VREG(VLD_MEM_VIFIFO_LEVEL) > 0x100)) &&
 		(timeout_val > 0) &&
 		(hw->start_process_time > 0) &&
 		((1000 * (jiffies - hw->start_process_time) / HZ)
@@ -869,7 +862,7 @@ static int vmjpeg_v4l_alloc_buff_config_canvas(struct vdec_mjpeg_hw_s *hw, int i
 		return 0;
 
 	ret = vdec_v4l_get_buffer(hw->v4l2_ctx, &fb);
-	if (ret) {
+	if (ret < 0) {
 		mmjpeg_debug_print(DECODE_ID(hw), 0,
 			"[%d] get fb fail.\n",
 			((struct aml_vcodec_ctx *)
@@ -1478,9 +1471,6 @@ static int ammvdec_mjpeg_probe(struct platform_device *pdev)
 		snprintf(pdata->vf_provider_name, VDEC_PROVIDER_NAME_SIZE,
 			PROVIDER_NAME ".%02x", pdev->id & 0xff);
 
-	platform_set_drvdata(pdev, pdata);
-	hw->platform_dev = pdev;
-
 	if (((debug_enable & IGNORE_PARAM_FROM_CONFIG) == 0) && pdata->config_len) {
 		mmjpeg_debug_print(DECODE_ID(hw), 0, "pdata->config: %s\n", pdata->config);
 		if (get_config_int(pdata->config, "parm_v4l_buffer_margin",
@@ -1497,6 +1487,9 @@ static int ammvdec_mjpeg_probe(struct platform_device *pdev)
 	vf_provider_init(&pdata->vframe_provider, pdata->vf_provider_name,
 		&vf_provider_ops, pdata);
 
+	platform_set_drvdata(pdev, pdata);
+
+	hw->platform_dev = pdev;
 
 	if (pdata->sys_info) {
 		hw->vmjpeg_amstream_dec_info = *pdata->sys_info;
