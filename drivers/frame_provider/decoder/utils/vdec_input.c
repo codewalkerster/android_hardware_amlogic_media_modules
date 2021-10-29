@@ -518,11 +518,10 @@ int vdec_input_set_buffer(struct vdec_input_s *input, u32 start, u32 size)
 		input->swap_page_phys = codec_mm_alloc_for_dma("SWAP",
 			1, 0, CODEC_MM_FLAGS_TVP);
 	else {
-		input->swap_page = alloc_page(GFP_KERNEL);
-		if (input->swap_page) {
-			input->swap_page_phys =
-				page_to_phys(input->swap_page);
-		}
+		input->swap_page = dma_alloc_coherent(v4l_get_dev_from_codec_mm(),
+			PAGE_SIZE, (dma_addr_t *)&input->swap_page_phys, GFP_KERNEL);
+		if (input->swap_page == NULL)
+			return -ENOMEM;
 	}
 
 	if (input->swap_page_phys == 0)
